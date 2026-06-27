@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from database import init_db
+from database import init_pool, init_db
 from routers import auth, session, events, stats, admin
 
 APP_VERSION = os.getenv("APP_VERSION", "1.0.0")
@@ -11,7 +11,8 @@ APP_VERSION = os.getenv("APP_VERSION", "1.0.0")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Cria tabelas e estado inicial do banco ao subir
+    # Inicializa o pool de conexões e cria as tabelas
+    init_pool()
     init_db()
     yield
 
