@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from passlib.context import CryptContext
 from typing import Optional
 
-from database import get_db
+from database import get_conn, release, cursor as db_cursor
 
 router = APIRouter(tags=["auth"])
 
@@ -35,9 +35,9 @@ class LoginBody(BaseModel):
 
 def get_current_user(token: str, conn):
     """Busca usuário pelo token ou levanta 401."""
-    usuario = conn.execute(
-        "SELECT * FROM users WHERE token=?", (token,)
-    ).fetchone()
+    cur = db_cursor(conn)
+    cur.execute("SELECT * FROM users WHERE token=%s", (token,))
+    usuario = cur.fetchone()
     if not usuario:
         raise HTTPException(status_code=401, detail="Token inválido ou expirado")
     return usuario
@@ -60,21 +60,26 @@ def register(body: RegisterBody):
     token = str(uuid.uuid4())
     senha_hash = pwd_ctx.hash(body.password)
 
-    with get_db() as conn:
-        existente = conn.execute(
-            "SELECT id FROM users WHERE email=?", (body.email,)
-        ).fetchone()
-        if existente:
+    conn = get_conn()
+    try:
+        cur = db_cursor(conn)
+        cur.execute("SELECT id FROM users WHERE email=%s", (body.email,))
+        if cur.fetchone():
             raise HTTPException(status_code=409, detail="Email já cadastrado")
 
-        conn.execute(
+        cur.execute(
             """INSERT INTO users (name, email, password_hash, token, created_at)
-               VALUES (?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s)""",
             (body.name, body.email, senha_hash, token, agora),
         )
-        usuario = conn.execute(
-            "SELECT id, name, level, xp_total FROM users WHERE token=?", (token,)
-        ).fetchone()
+
+        cur.execute(
+            "SELECT id, name, level, xp_total FROM users WHERE token=%s", (token,)
+        )
+        usuario = cur.fetchone()
+        conn.commit()
+    finally:
+        release(conn)
 
     return {
         "token": token,
@@ -87,12 +92,16 @@ def register(body: RegisterBody):
 
 @router.post("/login")
 def login(body: LoginBody):
-    with get_db() as conn:
-        usuario = conn.execute(
-            "SELECT * FROM users WHERE email=?", (body.email,)
-        ).fetchone()
-        if not usuario or not pwd_ctx.verify(body.password, usuario["password_hash"]):
-            raise HTTPException(status_code=401, detail="Email ou senha incorretos")
+    conn = get_conn()
+    try:
+        cur = db_cursor(conn)
+        cur.execute("SELECT * FROM users WHERE email=%s", (body.email,))
+        usuario = cur.fetchone()
+    finally:
+        release(conn)
+
+    if not usuario or not pwd_ctx.verify(body.password, usuario["password_hash"]):
+        raise HTTPException(status_code=401, detail="Email ou senha incorretos")
 
     return {
         "token": usuario["token"],
@@ -107,12 +116,19 @@ def login(body: LoginBody):
 @router.get("/me")
 def me(authorization: Optional[str] = Header(default=None)):
     token = extrair_token(authorization)
-    with get_db() as conn:
+
+    conn = get_conn()
+    try:
         usuario = get_current_user(token, conn)
-        badges = conn.execute(
-            "SELECT badge_key, earned_at FROM badges WHERE user_id=? ORDER BY earned_at",
+
+        cur = db_cursor(conn)
+        cur.execute(
+            "SELECT badge_key, earned_at FROM badges WHERE user_id=%s ORDER BY earned_at",
             (usuario["id"],),
-        ).fetchall()
+        )
+        badges = cur.fetchall()
+    finally:
+        release(conn)
 
     return {
         "id": usuario["id"],

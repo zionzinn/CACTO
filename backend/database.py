@@ -1,42 +1,50 @@
 import os
-import sqlite3
-from contextlib import contextmanager
+import psycopg2
+import psycopg2.extras
+from psycopg2.pool import ThreadedConnectionPool
 
-DATABASE_URL = os.getenv("DATABASE_URL", "cacto.db")
-
-
-def get_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(DATABASE_URL)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
+_pool: ThreadedConnectionPool | None = None
 
 
-@contextmanager
-def get_db():
-    conn = get_connection()
-    try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+def _get_pool() -> ThreadedConnectionPool:
+    global _pool
+    if _pool is None:
+        url = os.getenv("DATABASE_URL")
+        if not url:
+            raise RuntimeError("DATABASE_URL não configurada")
+        _pool = ThreadedConnectionPool(1, 10, dsn=url)
+    return _pool
+
+
+def get_conn():
+    """Retorna uma conexão do pool."""
+    return _get_pool().getconn()
+
+
+def release(conn):
+    """Devolve a conexão ao pool."""
+    _get_pool().putconn(conn)
+
+
+def cursor(conn):
+    """Retorna cursor com acesso por nome de coluna (RealDictCursor)."""
+    return conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
 
 def init_db():
-    """Cria todas as tabelas caso não existam e garante o estado inicial."""
-    with get_db() as conn:
-        conn.executescript("""
+    """Cria todas as tabelas se não existirem e inicializa session_state."""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS users (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                id              SERIAL PRIMARY KEY,
                 name            TEXT NOT NULL,
                 email           TEXT UNIQUE NOT NULL,
                 password_hash   TEXT NOT NULL,
                 token           TEXT UNIQUE NOT NULL,
-                is_admin        INTEGER DEFAULT 0,
+                is_admin        BOOLEAN DEFAULT FALSE,
                 xp_total        INTEGER DEFAULT 0,
                 level           INTEGER DEFAULT 1,
                 streak_current  INTEGER DEFAULT 0,
@@ -45,62 +53,77 @@ def init_db():
                 agent_version   TEXT,
                 last_seen       TEXT,
                 popup_mode      TEXT DEFAULT 'central',
-                created_at      TEXT DEFAULT CURRENT_TIMESTAMP
-            );
+                created_at      TEXT
+            )
+        """)
 
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS water_events (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id         INTEGER REFERENCES users(id),
-                alarm_time      TEXT NOT NULL,
-                response_time   TEXT,
-                response        TEXT NOT NULL,
-                response_secs   REAL,
-                xp_earned       INTEGER DEFAULT 0,
-                was_away        INTEGER DEFAULT 0,
-                was_paused      INTEGER DEFAULT 0,
-                is_catchup      INTEGER DEFAULT 0,
-                created_at      TEXT DEFAULT CURRENT_TIMESTAMP
-            );
+                id            SERIAL PRIMARY KEY,
+                user_id       INTEGER REFERENCES users(id),
+                alarm_time    TEXT NOT NULL,
+                response_time TEXT,
+                response      TEXT NOT NULL,
+                response_secs REAL,
+                xp_earned     INTEGER DEFAULT 0,
+                was_away      BOOLEAN DEFAULT FALSE,
+                was_paused    BOOLEAN DEFAULT FALSE,
+                is_catchup    BOOLEAN DEFAULT FALSE,
+                created_at    TEXT
+            )
+        """)
 
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS session_state (
-                id              INTEGER PRIMARY KEY DEFAULT 1,
-                is_active       INTEGER DEFAULT 0,
-                is_paused       INTEGER DEFAULT 0,
-                session_start   TEXT,
-                paused_at       TEXT,
-                paused_elapsed  INTEGER DEFAULT 0,
-                interval_min    INTEGER DEFAULT 25,
-                alarms_fired    INTEGER DEFAULT 0,
-                updated_at      TEXT
-            );
+                id             INTEGER PRIMARY KEY DEFAULT 1,
+                is_active      BOOLEAN DEFAULT FALSE,
+                is_paused      BOOLEAN DEFAULT FALSE,
+                session_start  TEXT,
+                paused_at      TEXT,
+                paused_elapsed INTEGER DEFAULT 0,
+                interval_min   INTEGER DEFAULT 25,
+                alarms_fired   INTEGER DEFAULT 0,
+                updated_at     TEXT
+            )
+        """)
 
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS daily_summary (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                id              SERIAL PRIMARY KEY,
                 user_id         INTEGER REFERENCES users(id),
                 date            TEXT NOT NULL,
                 alarms_total    INTEGER DEFAULT 0,
                 alarms_positive INTEGER DEFAULT 0,
                 alarms_away     INTEGER DEFAULT 0,
                 alarms_paused   INTEGER DEFAULT 0,
-                hit_goal        INTEGER DEFAULT 0,
-                streak_counted  INTEGER DEFAULT 0,
-                created_at      TEXT DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE TABLE IF NOT EXISTS badges (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id         INTEGER REFERENCES users(id),
-                badge_key       TEXT NOT NULL,
-                earned_at       TEXT DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE TABLE IF NOT EXISTS chat_messages (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id         INTEGER REFERENCES users(id),
-                content         TEXT NOT NULL,
-                is_system       INTEGER DEFAULT 0,
-                created_at      TEXT DEFAULT CURRENT_TIMESTAMP
-            );
-
-            INSERT OR IGNORE INTO session_state (id) VALUES (1);
+                hit_goal        BOOLEAN DEFAULT FALSE,
+                streak_counted  BOOLEAN DEFAULT FALSE,
+                created_at      TEXT
+            )
         """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS badges (
+                id        SERIAL PRIMARY KEY,
+                user_id   INTEGER REFERENCES users(id),
+                badge_key TEXT NOT NULL,
+                earned_at TEXT
+            )
+        """)
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id         SERIAL PRIMARY KEY,
+                user_id    INTEGER REFERENCES users(id),
+                content    TEXT NOT NULL,
+                is_system  BOOLEAN DEFAULT FALSE,
+                created_at TEXT
+            )
+        """)
+
+        # Garante a única linha de estado da sessão
+        cur.execute("INSERT INTO session_state (id) VALUES (1) ON CONFLICT DO NOTHING")
+
+        conn.commit()
+    finally:
+        release(conn)

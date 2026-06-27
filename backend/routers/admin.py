@@ -1,11 +1,10 @@
 """Rotas administrativas — requerem SECRET_KEY."""
 
-import os
 from datetime import datetime, timedelta
 from fastapi import APIRouter, HTTPException, Header
 from typing import Optional
 
-from database import get_db
+from database import get_conn, release, cursor as db_cursor
 from routers.session import _require_admin
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -23,8 +22,10 @@ def _agora() -> str:
 def admin_users(authorization: Optional[str] = Header(default=None)):
     """Lista todos os usuários com stats resumidos."""
     _require_admin(authorization)
-    with get_db() as conn:
-        rows = conn.execute(
+    conn = get_conn()
+    try:
+        cur = db_cursor(conn)
+        cur.execute(
             """SELECT
                 u.id, u.name, u.email, u.is_admin, u.xp_total, u.level,
                 u.streak_current, u.streak_best, u.last_seen, u.agent_version,
@@ -32,7 +33,10 @@ def admin_users(authorization: Optional[str] = Header(default=None)):
                 (SELECT COUNT(*) FROM water_events WHERE user_id=u.id) AS total_eventos
                FROM users u
                ORDER BY u.name"""
-        ).fetchall()
+        )
+        rows = cur.fetchall()
+    finally:
+        release(conn)
     return [dict(r) for r in rows]
 
 
@@ -45,14 +49,19 @@ def admin_online(authorization: Optional[str] = Header(default=None)):
     """Lista usuários com last_seen nos últimos 2 minutos."""
     _require_admin(authorization)
     dois_min_atras = (datetime.utcnow() - timedelta(minutes=2)).isoformat()
-    with get_db() as conn:
-        rows = conn.execute(
+    conn = get_conn()
+    try:
+        cur = db_cursor(conn)
+        cur.execute(
             """SELECT id, name, last_seen, agent_version, level, xp_total
                FROM users
-               WHERE last_seen >= ? AND is_admin=0
+               WHERE last_seen >= %s AND is_admin = FALSE
                ORDER BY last_seen DESC""",
             (dois_min_atras,),
-        ).fetchall()
+        )
+        rows = cur.fetchall()
+    finally:
+        release(conn)
     return [dict(r) for r in rows]
 
 
@@ -74,19 +83,24 @@ def admin_events(
     params: list = []
 
     if user_id is not None:
-        query += " AND we.user_id=?"
+        query += " AND we.user_id=%s"
         params.append(user_id)
     if date:
-        query += " AND DATE(we.alarm_time)=?"
+        query += " AND LEFT(we.alarm_time, 10)=%s"
         params.append(date)
     if response:
-        query += " AND we.response=?"
+        query += " AND we.response=%s"
         params.append(response)
 
     query += " ORDER BY we.alarm_time DESC LIMIT 500"
 
-    with get_db() as conn:
-        rows = conn.execute(query, params).fetchall()
+    conn = get_conn()
+    try:
+        cur = db_cursor(conn)
+        cur.execute(query, params if params else None)
+        rows = cur.fetchall()
+    finally:
+        release(conn)
     return [dict(r) for r in rows]
 
 
@@ -98,17 +112,22 @@ def admin_events(
 def admin_delete_user(user_id: int, authorization: Optional[str] = Header(default=None)):
     """Deleta usuário e todos os seus dados relacionados."""
     _require_admin(authorization)
-    with get_db() as conn:
-        usuario = conn.execute("SELECT id FROM users WHERE id=?", (user_id,)).fetchone()
-        if not usuario:
+    conn = get_conn()
+    try:
+        cur = db_cursor(conn)
+        cur.execute("SELECT id FROM users WHERE id=%s", (user_id,))
+        if not cur.fetchone():
             raise HTTPException(status_code=404, detail="Usuário não encontrado")
 
-        conn.execute("DELETE FROM water_events WHERE user_id=?", (user_id,))
-        conn.execute("DELETE FROM daily_summary WHERE user_id=?", (user_id,))
-        conn.execute("DELETE FROM badges WHERE user_id=?", (user_id,))
-        conn.execute("DELETE FROM chat_messages WHERE user_id=?", (user_id,))
-        conn.execute("DELETE FROM users WHERE id=?", (user_id,))
+        for tabela in ("water_events", "daily_summary", "badges", "chat_messages"):
+            c = db_cursor(conn)
+            c.execute(f"DELETE FROM {tabela} WHERE user_id=%s", (user_id,))
 
+        c2 = db_cursor(conn)
+        c2.execute("DELETE FROM users WHERE id=%s", (user_id,))
+        conn.commit()
+    finally:
+        release(conn)
     return {"ok": True, "deleted_user_id": user_id}
 
 
@@ -121,12 +140,17 @@ def admin_reset_session(authorization: Optional[str] = Header(default=None)):
     """Reseta session_state para o estado inicial — use em emergências."""
     _require_admin(authorization)
     agora = _agora()
-    with get_db() as conn:
-        conn.execute(
+    conn = get_conn()
+    try:
+        cur = db_cursor(conn)
+        cur.execute(
             """UPDATE session_state
-               SET is_active=0, is_paused=0, session_start=NULL, paused_at=NULL,
-                   paused_elapsed=0, alarms_fired=0, updated_at=?
+               SET is_active=FALSE, is_paused=FALSE, session_start=NULL, paused_at=NULL,
+                   paused_elapsed=0, alarms_fired=0, updated_at=%s
                WHERE id=1""",
             (agora,),
         )
+        conn.commit()
+    finally:
+        release(conn)
     return {"ok": True, "message": "Sessão resetada com sucesso"}

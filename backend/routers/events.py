@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel
 from typing import Optional
 
-from database import get_db
+from database import get_conn, release, cursor as db_cursor
 from routers.auth import get_current_user, extrair_token
 from gamification import calcular_xp, calcular_level, verificar_badges_evento
 
@@ -56,8 +56,8 @@ def _registrar_evento(
     response: str,
     alarm_time: str,
     response_time: Optional[str],
-    is_catchup: int,
-    was_away: int,
+    is_catchup: bool,
+    was_away: bool,
     conn,
 ) -> dict:
     """Salva evento, calcula XP, atualiza usuário e retorna resultado."""
@@ -67,17 +67,20 @@ def _registrar_evento(
     if response_time:
         response_secs = _calcular_response_secs(alarm_time, response_time)
 
-    usuario = conn.execute(
-        "SELECT xp_total, level, streak_current FROM users WHERE id=?", (user_id,)
-    ).fetchone()
+    cur = db_cursor(conn)
+    cur.execute(
+        "SELECT xp_total, level, streak_current FROM users WHERE id=%s", (user_id,)
+    )
+    usuario = cur.fetchone()
 
     xp = calcular_xp(response, response_secs, usuario["streak_current"])
 
-    conn.execute(
+    cur2 = db_cursor(conn)
+    cur2.execute(
         """INSERT INTO water_events
            (user_id, alarm_time, response_time, response, response_secs,
             xp_earned, was_away, is_catchup, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
         (user_id, alarm_time, response_time, response, response_secs,
          xp, was_away, is_catchup, agora),
     )
@@ -85,8 +88,9 @@ def _registrar_evento(
     novo_xp = usuario["xp_total"] + xp
     novo_level, level_name, xp_proximo = calcular_level(novo_xp)
 
-    conn.execute(
-        "UPDATE users SET xp_total=?, level=?, last_seen=? WHERE id=?",
+    cur3 = db_cursor(conn)
+    cur3.execute(
+        "UPDATE users SET xp_total=%s, level=%s, last_seen=%s WHERE id=%s",
         (novo_xp, novo_level, agora, user_id),
     )
 
@@ -108,36 +112,52 @@ def _registrar_evento(
 @router.post("/events/drink")
 def event_drink(body: DrinkBody, authorization: Optional[str] = Header(default=None)):
     token = extrair_token(authorization)
-    with get_db() as conn:
+    conn = get_conn()
+    try:
         usuario = get_current_user(token, conn)
-        return _registrar_evento(
-            usuario["id"], "drank", body.alarm_time, body.response_time, 0, 0, conn
+        result = _registrar_evento(
+            usuario["id"], "drank", body.alarm_time, body.response_time, False, False, conn
         )
+        conn.commit()
+        return result
+    finally:
+        release(conn)
 
 
 @router.post("/events/empty")
 def event_empty(body: DrinkBody, authorization: Optional[str] = Header(default=None)):
     token = extrair_token(authorization)
-    with get_db() as conn:
+    conn = get_conn()
+    try:
         usuario = get_current_user(token, conn)
-        return _registrar_evento(
-            usuario["id"], "empty_bottle", body.alarm_time, body.response_time, 0, 0, conn
+        result = _registrar_evento(
+            usuario["id"], "empty_bottle", body.alarm_time, body.response_time, False, False, conn
         )
+        conn.commit()
+        return result
+    finally:
+        release(conn)
 
 
 @router.post("/events/timeout")
 def event_timeout(body: TimeoutBody, authorization: Optional[str] = Header(default=None)):
     token = extrair_token(authorization)
     agora = datetime.utcnow().isoformat()
-    with get_db() as conn:
+    conn = get_conn()
+    try:
         usuario = get_current_user(token, conn)
-        conn.execute(
+        cur = db_cursor(conn)
+        cur.execute(
             """INSERT INTO water_events
                (user_id, alarm_time, response, xp_earned, created_at)
-               VALUES (?, ?, 'timeout', 0, ?)""",
+               VALUES (%s, %s, 'timeout', 0, %s)""",
             (usuario["id"], body.alarm_time, agora),
         )
-        conn.execute("UPDATE users SET last_seen=? WHERE id=?", (agora, usuario["id"]))
+        cur2 = db_cursor(conn)
+        cur2.execute("UPDATE users SET last_seen=%s WHERE id=%s", (agora, usuario["id"]))
+        conn.commit()
+    finally:
+        release(conn)
     return {"xp_earned": 0}
 
 
@@ -145,15 +165,21 @@ def event_timeout(body: TimeoutBody, authorization: Optional[str] = Header(defau
 def event_away(body: AwayBody, authorization: Optional[str] = Header(default=None)):
     token = extrair_token(authorization)
     agora = datetime.utcnow().isoformat()
-    with get_db() as conn:
+    conn = get_conn()
+    try:
         usuario = get_current_user(token, conn)
-        conn.execute(
+        cur = db_cursor(conn)
+        cur.execute(
             """INSERT INTO water_events
                (user_id, alarm_time, response, xp_earned, was_away, created_at)
-               VALUES (?, ?, 'away', 0, 1, ?)""",
+               VALUES (%s, %s, 'away', 0, TRUE, %s)""",
             (usuario["id"], body.alarm_time, agora),
         )
-        conn.execute("UPDATE users SET last_seen=? WHERE id=?", (agora, usuario["id"]))
+        cur2 = db_cursor(conn)
+        cur2.execute("UPDATE users SET last_seen=%s WHERE id=%s", (agora, usuario["id"]))
+        conn.commit()
+    finally:
+        release(conn)
     return {"xp_earned": 0}
 
 
@@ -165,38 +191,52 @@ def event_catchup(body: CatchupBody, authorization: Optional[str] = Header(defau
             detail="response deve ser 'catchup_yes' ou 'catchup_no'",
         )
     token = extrair_token(authorization)
-    with get_db() as conn:
+    conn = get_conn()
+    try:
         usuario = get_current_user(token, conn)
-        return _registrar_evento(
-            usuario["id"], body.response, body.alarm_time, None, 1, 0, conn
+        result = _registrar_evento(
+            usuario["id"], body.response, body.alarm_time, None, True, False, conn
         )
+        conn.commit()
+        return result
+    finally:
+        release(conn)
 
 
 @router.post("/heartbeat")
 def heartbeat(body: HeartbeatBody, authorization: Optional[str] = Header(default=None)):
     """
     Endpoint mais chamado do sistema (a cada 30s por 22 PCs).
-    Deve ser leve: apenas UPDATE + SELECT.
+    Leve: apenas UPDATE + SELECT.
     """
     token = extrair_token(authorization)
     agora = datetime.utcnow().isoformat()
 
-    with get_db() as conn:
-        usuario = conn.execute("SELECT id FROM users WHERE token=?", (token,)).fetchone()
+    conn = get_conn()
+    try:
+        cur = db_cursor(conn)
+        cur.execute("SELECT id FROM users WHERE token=%s", (token,))
+        usuario = cur.fetchone()
         if not usuario:
             raise HTTPException(status_code=401, detail="Token inválido")
 
+        cur2 = db_cursor(conn)
         if body.agent_version:
-            conn.execute(
-                "UPDATE users SET last_seen=?, agent_version=? WHERE id=?",
+            cur2.execute(
+                "UPDATE users SET last_seen=%s, agent_version=%s WHERE id=%s",
                 (agora, body.agent_version, usuario["id"]),
             )
         else:
-            conn.execute(
-                "UPDATE users SET last_seen=? WHERE id=?",
+            cur2.execute(
+                "UPDATE users SET last_seen=%s WHERE id=%s",
                 (agora, usuario["id"]),
             )
 
-        sessao = conn.execute("SELECT * FROM session_state WHERE id=1").fetchone()
+        cur3 = db_cursor(conn)
+        cur3.execute("SELECT * FROM session_state WHERE id=1")
+        sessao = cur3.fetchone()
+        conn.commit()
+    finally:
+        release(conn)
 
     return dict(sessao)

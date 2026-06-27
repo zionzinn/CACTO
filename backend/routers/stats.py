@@ -4,7 +4,7 @@ from datetime import datetime, date, timedelta
 from fastapi import APIRouter, Header
 from typing import Optional
 
-from database import get_db
+from database import get_conn, release, cursor as db_cursor
 from routers.auth import get_current_user, extrair_token
 from gamification import calcular_level, LEVELS
 from routers.session import _calcular_next_alarm, _ler_session
@@ -25,38 +25,46 @@ def _hoje() -> str:
 @router.get("/stats/me")
 def stats_me(authorization: Optional[str] = Header(default=None)):
     token = extrair_token(authorization)
-    with get_db() as conn:
+
+    conn = get_conn()
+    try:
         usuario = get_current_user(token, conn)
 
-        # Histórico 7 dias
+        # Histórico dos últimos 7 dias
         sete_dias = [
             (date.today() - timedelta(days=i)).isoformat() for i in range(6, -1, -1)
         ]
         historico = []
         for d in sete_dias:
-            row = conn.execute(
-                "SELECT * FROM daily_summary WHERE user_id=? AND date=?",
+            cur = db_cursor(conn)
+            cur.execute(
+                "SELECT * FROM daily_summary WHERE user_id=%s AND date=%s",
                 (usuario["id"], d),
-            ).fetchone()
+            )
+            row = cur.fetchone()
             historico.append(dict(row) if row else {"date": d, "alarms_positive": 0, "alarms_total": 0})
 
-        # Badges
-        badges = conn.execute(
-            "SELECT badge_key, earned_at FROM badges WHERE user_id=? ORDER BY earned_at",
+        cur2 = db_cursor(conn)
+        cur2.execute(
+            "SELECT badge_key, earned_at FROM badges WHERE user_id=%s ORDER BY earned_at",
             (usuario["id"],),
-        ).fetchall()
+        )
+        badges = cur2.fetchall()
 
-        # Totais
-        totais = conn.execute(
+        cur3 = db_cursor(conn)
+        cur3.execute(
             """SELECT
                 SUM(CASE WHEN response='drank'        THEN 1 ELSE 0 END) AS total_drank,
                 SUM(CASE WHEN response='empty_bottle' THEN 1 ELSE 0 END) AS total_empty,
                 SUM(CASE WHEN response='timeout'      THEN 1 ELSE 0 END) AS total_timeout
-               FROM water_events WHERE user_id=?""",
+               FROM water_events WHERE user_id=%s""",
             (usuario["id"],),
-        ).fetchone()
+        )
+        totais = cur3.fetchone()
 
         _, level_name, xp_proximo = calcular_level(usuario["xp_total"])
+    finally:
+        release(conn)
 
     return {
         "xp_total": usuario["xp_total"],
@@ -88,8 +96,10 @@ def stats_ranking(period: str = "day"):
     else:
         inicio = hoje.isoformat()
 
-    with get_db() as conn:
-        rows = conn.execute(
+    conn = get_conn()
+    try:
+        cur = db_cursor(conn)
+        cur.execute(
             """SELECT
                 u.id,
                 u.name,
@@ -101,12 +111,15 @@ def stats_ranking(period: str = "day"):
                 COALESCE(SUM(we.xp_earned), 0) AS xp_periodo
                FROM users u
                LEFT JOIN water_events we
-                 ON we.user_id = u.id AND DATE(we.alarm_time) >= ?
-               WHERE u.is_admin = 0
-               GROUP BY u.id
+                 ON we.user_id = u.id AND LEFT(we.alarm_time, 10) >= %s
+               WHERE u.is_admin = FALSE
+               GROUP BY u.id, u.name, u.xp_total, u.level, u.streak_current
                ORDER BY xp_periodo DESC, alarms_positive DESC""",
             (inicio,),
-        ).fetchall()
+        )
+        rows = cur.fetchall()
+    finally:
+        release(conn)
 
     resultado = []
     for i, row in enumerate(rows, start=1):
@@ -133,46 +146,50 @@ def stats_ranking(period: str = "day"):
 
 @router.get("/stats/team")
 def stats_team():
-    """Visão geral do time — sem auth."""
+    """Visão geral do time — sem autenticação."""
     hoje = _hoje()
-    dois_min_atras = (
-        datetime.utcnow() - timedelta(minutes=2)
-    ).isoformat()
+    dois_min_atras = (datetime.utcnow() - timedelta(minutes=2)).isoformat()
 
-    with get_db() as conn:
-        # Online nos últimos 2 minutos
-        total_online = conn.execute(
-            "SELECT COUNT(*) AS c FROM users WHERE last_seen >= ? AND is_admin=0",
+    conn = get_conn()
+    try:
+        cur = db_cursor(conn)
+        cur.execute(
+            "SELECT COUNT(*) AS c FROM users WHERE last_seen >= %s AND is_admin = FALSE",
             (dois_min_atras,),
-        ).fetchone()["c"]
+        )
+        total_online = cur.fetchone()["c"]
 
-        # Usuários que beberam hoje
-        bebendo_hoje = conn.execute(
+        cur2 = db_cursor(conn)
+        cur2.execute(
             """SELECT COUNT(DISTINCT user_id) AS c FROM water_events
-               WHERE DATE(alarm_time)=? AND response IN ('drank','empty_bottle')""",
+               WHERE LEFT(alarm_time, 10)=%s AND response IN ('drank','empty_bottle')""",
             (hoje,),
-        ).fetchone()["c"]
+        )
+        bebendo_hoje = cur2.fetchone()["c"]
 
-        # Média de pct do time hoje
-        medias = conn.execute(
-            """SELECT
-                AVG(CASE WHEN alarms_total > 0
-                    THEN CAST(alarms_positive AS REAL)/alarms_total
-                    ELSE 0 END) AS media_pct
-               FROM daily_summary WHERE date=?""",
+        cur3 = db_cursor(conn)
+        cur3.execute(
+            """SELECT AVG(
+                CASE WHEN alarms_total > 0
+                     THEN CAST(alarms_positive AS REAL) / alarms_total
+                     ELSE 0 END
+               ) AS media_pct
+               FROM daily_summary WHERE date=%s""",
             (hoje,),
-        ).fetchone()
+        )
+        medias = cur3.fetchone()
         team_pct = round((medias["media_pct"] or 0.0) * 100, 1)
 
-        # Maior streak ativo
-        top_streak = conn.execute(
-            """SELECT name, streak_current FROM users
-               WHERE is_admin=0 ORDER BY streak_current DESC LIMIT 1""",
-        ).fetchone()
+        cur4 = db_cursor(conn)
+        cur4.execute(
+            "SELECT name, streak_current FROM users WHERE is_admin = FALSE ORDER BY streak_current DESC LIMIT 1"
+        )
+        top_streak = cur4.fetchone()
 
-        # Estado da sessão
         state = _ler_session(conn)
         next_alarm = _calcular_next_alarm(state)
+    finally:
+        release(conn)
 
     return {
         "total_online": total_online,

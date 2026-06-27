@@ -1,19 +1,25 @@
 """
 Script avulso para criar a conta admin do Zion.
-Rodar UMA VEZ localmente: python create_admin.py
+Rodar UMA VEZ: python create_admin.py
+Requer DATABASE_URL configurada no ambiente (ou em .env).
 """
 
 import uuid
-import sqlite3
 import getpass
 import os
+import psycopg2
+import psycopg2.extras
 from passlib.context import CryptContext
 
-DATABASE_URL = os.getenv("DATABASE_URL", "cacto.db")
 pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 def main():
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        print("Erro: variável DATABASE_URL não configurada.")
+        return
+
     print("=== Criação de conta admin CACTO ===\n")
     nome  = input("Nome: ").strip()
     email = input("Email: ").strip()
@@ -26,24 +32,32 @@ def main():
     token = str(uuid.uuid4())
     senha_hash = pwd_ctx.hash(senha)
 
-    conn = sqlite3.connect(DATABASE_URL)
-    conn.row_factory = sqlite3.Row
+    conn = psycopg2.connect(database_url)
+    conn.autocommit = False
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
     try:
-        existente = conn.execute("SELECT id FROM users WHERE email=?", (email,)).fetchone()
-        if existente:
+        cur.execute("SELECT id FROM users WHERE email=%s", (email,))
+        if cur.fetchone():
             print(f"\nUsuário com email '{email}' já existe.")
-            conn.close()
             return
 
-        conn.execute(
-            """INSERT INTO users (name, email, password_hash, token, is_admin)
-               VALUES (?, ?, ?, ?, 1)""",
-            (nome, email, senha_hash, token),
+        from datetime import datetime
+        agora = datetime.utcnow().isoformat()
+
+        cur.execute(
+            """INSERT INTO users (name, email, password_hash, token, is_admin, created_at)
+               VALUES (%s, %s, %s, %s, TRUE, %s)""",
+            (nome, email, senha_hash, token, agora),
         )
         conn.commit()
         print(f"\nAdmin criado com sucesso!")
         print(f"Token: {token}")
+    except Exception as e:
+        conn.rollback()
+        print(f"Erro: {e}")
     finally:
+        cur.close()
         conn.close()
 
 

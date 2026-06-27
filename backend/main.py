@@ -40,11 +40,13 @@ app.include_router(admin.router)
 
 @app.get("/health", tags=["infra"])
 def health():
-    from database import get_connection
+    from database import get_conn, release
     try:
-        conn = get_connection()
-        conn.execute("SELECT 1").fetchone()
-        conn.close()
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT 1")
+        cur.fetchone()
+        release(conn)
         db_status = "connected"
     except Exception:
         db_status = "error"

@@ -1,6 +1,7 @@
 """Regras de gamificação do CACTO — XP, níveis, streaks e badges."""
 
 from datetime import datetime, date, timedelta
+from database import cursor as db_cursor
 
 # ---------------------------------------------------------------------------
 # XP base por tipo de resposta
@@ -27,24 +28,23 @@ LEVELS = [
 ]
 
 # ---------------------------------------------------------------------------
-# Meta diária para streak
+# Metas diárias
 # ---------------------------------------------------------------------------
 META_STREAK_PCT = 0.70
-META_GOAL_PCT   = 0.75  # usada no hit_goal / bônus diário
+META_GOAL_PCT   = 0.75
 
 XP_BONUS_DIA = 50
 
 # ---------------------------------------------------------------------------
-# Funções principais
+# Funções de XP
 # ---------------------------------------------------------------------------
 
 def calcular_xp(response: str, response_secs: float | None, streak_current: int) -> int:
-    """Calcula o XP final de um evento, aplicando bônus de velocidade e streak."""
+    """Calcula XP final do evento com bônus de velocidade e multiplicador de streak."""
     xp_base = XP_BASE.get(response, 0)
     if xp_base == 0:
         return 0
 
-    # Bônus de velocidade (apenas em respostas normais, não catchup)
     xp_velocidade = 0
     if response not in ("catchup_yes", "catchup_no") and response_secs is not None:
         if response_secs < 3:
@@ -52,7 +52,6 @@ def calcular_xp(response: str, response_secs: float | None, streak_current: int)
         elif response_secs < 5:
             xp_velocidade = 2
 
-    # Multiplicador de streak (não se aplica a catchup)
     if response in ("catchup_yes", "catchup_no"):
         multiplicador = 1.0
     else:
@@ -94,12 +93,8 @@ def atualizar_streak(
     hit_meta: bool,
     hoje: str,
 ) -> tuple[int, int, str]:
-    """
-    Atualiza streak_current, streak_best e streak_last_day.
-    Retorna (novo_streak_current, novo_streak_best, novo_streak_last_day).
-    """
+    """Retorna (novo_streak_current, novo_streak_best, novo_streak_last_day)."""
     if not hit_meta:
-        # Não bateu a meta hoje, streak zera
         return 0, streak_best, hoje
 
     ontem = (date.fromisoformat(hoje) - timedelta(days=1)).isoformat()
@@ -107,10 +102,8 @@ def atualizar_streak(
     if streak_last_day == ontem:
         novo_current = streak_current + 1
     elif streak_last_day == hoje:
-        # Já foi contado hoje (sessão fechada duas vezes)
         novo_current = streak_current
     else:
-        # Quebrou a sequência
         novo_current = 1
 
     novo_best = max(streak_best, novo_current)
@@ -133,62 +126,61 @@ BADGES_DEFINICOES = {
 }
 
 
-def verificar_badges_evento(
-    user_id: int,
-    response: str,
-    conn,
-) -> list[str]:
-    """
-    Verifica e concede badges disparadas por evento individual.
-    Retorna lista de badge_keys conquistadas agora.
-    """
+def verificar_badges_evento(user_id: int, response: str, conn) -> list[str]:
+    """Verifica e concede badges disparadas por evento. Retorna lista de badge_keys novas."""
     novos = []
 
     # primeiro_gole — primeiro evento positivo do usuário
     if response in ("drank", "empty_bottle", "catchup_yes"):
-        ja_tem = conn.execute(
-            "SELECT 1 FROM badges WHERE user_id=? AND badge_key='primeiro_gole'",
+        cur = db_cursor(conn)
+        cur.execute(
+            "SELECT 1 FROM badges WHERE user_id=%s AND badge_key='primeiro_gole'",
             (user_id,),
-        ).fetchone()
-        if not ja_tem:
+        )
+        if not cur.fetchone():
             _conceder_badge(user_id, "primeiro_gole", conn)
             novos.append("primeiro_gole")
 
-    # em_chamas — streak atinge 7
-    usuario = conn.execute(
-        "SELECT streak_current FROM users WHERE id=?", (user_id,)
-    ).fetchone()
+    # em_chamas e diamante — baseados no streak atual
+    cur = db_cursor(conn)
+    cur.execute("SELECT streak_current FROM users WHERE id=%s", (user_id,))
+    usuario = cur.fetchone()
+
     if usuario and usuario["streak_current"] >= 7:
-        ja_tem = conn.execute(
-            "SELECT 1 FROM badges WHERE user_id=? AND badge_key='em_chamas'",
+        cur2 = db_cursor(conn)
+        cur2.execute(
+            "SELECT 1 FROM badges WHERE user_id=%s AND badge_key='em_chamas'",
             (user_id,),
-        ).fetchone()
-        if not ja_tem:
+        )
+        if not cur2.fetchone():
             _conceder_badge(user_id, "em_chamas", conn)
             novos.append("em_chamas")
 
-    # diamante — streak atinge 30
     if usuario and usuario["streak_current"] >= 30:
-        ja_tem = conn.execute(
-            "SELECT 1 FROM badges WHERE user_id=? AND badge_key='diamante'",
+        cur3 = db_cursor(conn)
+        cur3.execute(
+            "SELECT 1 FROM badges WHERE user_id=%s AND badge_key='diamante'",
             (user_id,),
-        ).fetchone()
-        if not ja_tem:
+        )
+        if not cur3.fetchone():
             _conceder_badge(user_id, "diamante", conn)
             novos.append("diamante")
 
     # abastecedor — 50 empty_bottle no total
     if response == "empty_bottle":
-        total_empty = conn.execute(
-            "SELECT COUNT(*) AS c FROM water_events WHERE user_id=? AND response='empty_bottle'",
+        cur4 = db_cursor(conn)
+        cur4.execute(
+            "SELECT COUNT(*) AS c FROM water_events WHERE user_id=%s AND response='empty_bottle'",
             (user_id,),
-        ).fetchone()["c"]
+        )
+        total_empty = cur4.fetchone()["c"]
         if total_empty >= 50:
-            ja_tem = conn.execute(
-                "SELECT 1 FROM badges WHERE user_id=? AND badge_key='abastecedor'",
+            cur5 = db_cursor(conn)
+            cur5.execute(
+                "SELECT 1 FROM badges WHERE user_id=%s AND badge_key='abastecedor'",
                 (user_id,),
-            ).fetchone()
-            if not ja_tem:
+            )
+            if not cur5.fetchone():
                 _conceder_badge(user_id, "abastecedor", conn)
                 novos.append("abastecedor")
 
@@ -196,18 +188,17 @@ def verificar_badges_evento(
 
 
 def verificar_badges_fim_dia(user_id: int, hoje: str, conn) -> list[str]:
-    """
-    Verifica badges que só podem ser concedidas ao fechar o dia.
-    Retorna lista de badge_keys conquistadas agora.
-    """
+    """Verifica badges de fim de dia. Retorna lista de badge_keys novas."""
     novos = []
 
-    eventos_hoje = conn.execute(
+    cur = db_cursor(conn)
+    cur.execute(
         """SELECT response, response_secs
            FROM water_events
-           WHERE user_id=? AND DATE(alarm_time)=?""",
+           WHERE user_id=%s AND LEFT(alarm_time, 10)=%s""",
         (user_id, hoje),
-    ).fetchall()
+    )
+    eventos_hoje = cur.fetchall()
 
     if not eventos_hoje:
         return novos
@@ -217,22 +208,24 @@ def verificar_badges_fim_dia(user_id: int, hoje: str, conn) -> list[str]:
 
     # mare_alta — 100% dos alarmes positivos
     if total > 0 and len(positivos) == total:
-        ja_tem = conn.execute(
-            "SELECT 1 FROM badges WHERE user_id=? AND badge_key='mare_alta'",
+        cur2 = db_cursor(conn)
+        cur2.execute(
+            "SELECT 1 FROM badges WHERE user_id=%s AND badge_key='mare_alta'",
             (user_id,),
-        ).fetchone()
-        if not ja_tem:
+        )
+        if not cur2.fetchone():
             _conceder_badge(user_id, "mare_alta", conn)
             novos.append("mare_alta")
 
-    # relampago — todos respondidos em < 3s
+    # relampago — todos os positivos respondidos em < 3s
     tempos = [e["response_secs"] for e in positivos if e["response_secs"] is not None]
     if positivos and tempos and all(t < 3 for t in tempos) and len(tempos) == total:
-        ja_tem = conn.execute(
-            "SELECT 1 FROM badges WHERE user_id=? AND badge_key='relampago'",
+        cur3 = db_cursor(conn)
+        cur3.execute(
+            "SELECT 1 FROM badges WHERE user_id=%s AND badge_key='relampago'",
             (user_id,),
-        ).fetchone()
-        if not ja_tem:
+        )
+        if not cur3.fetchone():
             _conceder_badge(user_id, "relampago", conn)
             novos.append("relampago")
 
@@ -241,7 +234,8 @@ def verificar_badges_fim_dia(user_id: int, hoje: str, conn) -> list[str]:
 
 def _conceder_badge(user_id: int, badge_key: str, conn):
     agora = datetime.utcnow().isoformat()
-    conn.execute(
-        "INSERT INTO badges (user_id, badge_key, earned_at) VALUES (?, ?, ?)",
+    cur = db_cursor(conn)
+    cur.execute(
+        "INSERT INTO badges (user_id, badge_key, earned_at) VALUES (%s, %s, %s)",
         (user_id, badge_key, agora),
     )
