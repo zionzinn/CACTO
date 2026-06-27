@@ -7,8 +7,10 @@ Requer DATABASE_URL configurada no ambiente (ou em .env).
 import uuid
 import getpass
 import os
-import psycopg2
-import psycopg2.extras
+from datetime import datetime
+
+import psycopg
+from psycopg.rows import dict_row
 from passlib.context import CryptContext
 
 pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -29,36 +31,25 @@ def main():
         print("Erro: todos os campos são obrigatórios.")
         return
 
-    token = str(uuid.uuid4())
+    token     = str(uuid.uuid4())
     senha_hash = pwd_ctx.hash(senha)
 
-    conn = psycopg2.connect(database_url)
-    conn.autocommit = False
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    with psycopg.connect(database_url, row_factory=dict_row) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM users WHERE email=%s", (email,))
+            if cur.fetchone():
+                print(f"\nUsuário com email '{email}' já existe.")
+                return
 
-    try:
-        cur.execute("SELECT id FROM users WHERE email=%s", (email,))
-        if cur.fetchone():
-            print(f"\nUsuário com email '{email}' já existe.")
-            return
-
-        from datetime import datetime
-        agora = datetime.utcnow().isoformat()
-
-        cur.execute(
-            """INSERT INTO users (name, email, password_hash, token, is_admin, created_at)
-               VALUES (%s, %s, %s, %s, TRUE, %s)""",
-            (nome, email, senha_hash, token, agora),
-        )
+            cur.execute(
+                """INSERT INTO users (name, email, password_hash, token, is_admin)
+                   VALUES (%s, %s, %s, %s, TRUE)""",
+                (nome, email, senha_hash, token),
+            )
         conn.commit()
-        print(f"\nAdmin criado com sucesso!")
-        print(f"Token: {token}")
-    except Exception as e:
-        conn.rollback()
-        print(f"Erro: {e}")
-    finally:
-        cur.close()
-        conn.close()
+
+    print(f"\nAdmin criado com sucesso!")
+    print(f"Token: {token}")
 
 
 if __name__ == "__main__":
