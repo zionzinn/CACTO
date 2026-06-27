@@ -1,5 +1,5 @@
-import sqlite3
 import os
+import sqlite3
 from contextlib import contextmanager
 
 DATABASE_URL = os.getenv("DATABASE_URL", "cacto.db")
@@ -27,56 +27,80 @@ def get_db():
 
 
 def init_db():
-    """Cria todas as tabelas se não existirem."""
+    """Cria todas as tabelas caso não existam e garante o estado inicial."""
     with get_db() as conn:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS users (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                computer_id TEXT UNIQUE NOT NULL,
-                is_admin INTEGER DEFAULT 0,
-                active INTEGER DEFAULT 1,
-                xp_total INTEGER DEFAULT 0,
-                badge TEXT DEFAULT 'SEMENTE',
-                created_at TEXT
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                name            TEXT NOT NULL,
+                email           TEXT UNIQUE NOT NULL,
+                password_hash   TEXT NOT NULL,
+                token           TEXT UNIQUE NOT NULL,
+                is_admin        INTEGER DEFAULT 0,
+                xp_total        INTEGER DEFAULT 0,
+                level           INTEGER DEFAULT 1,
+                streak_current  INTEGER DEFAULT 0,
+                streak_best     INTEGER DEFAULT 0,
+                streak_last_day TEXT,
+                agent_version   TEXT,
+                last_seen       TEXT,
+                popup_mode      TEXT DEFAULT 'central',
+                created_at      TEXT DEFAULT CURRENT_TIMESTAMP
             );
 
-            CREATE TABLE IF NOT EXISTS sessions (
-                id TEXT PRIMARY KEY,
-                user_id TEXT REFERENCES users(id),
-                started_at TEXT,
-                ended_at TEXT,
-                paused_by_admin INTEGER DEFAULT 0
+            CREATE TABLE IF NOT EXISTS water_events (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id         INTEGER REFERENCES users(id),
+                alarm_time      TEXT NOT NULL,
+                response_time   TEXT,
+                response        TEXT NOT NULL,
+                response_secs   REAL,
+                xp_earned       INTEGER DEFAULT 0,
+                was_away        INTEGER DEFAULT 0,
+                was_paused      INTEGER DEFAULT 0,
+                is_catchup      INTEGER DEFAULT 0,
+                created_at      TEXT DEFAULT CURRENT_TIMESTAMP
             );
 
-            CREATE TABLE IF NOT EXISTS alarms (
-                id TEXT PRIMARY KEY,
-                session_id TEXT REFERENCES sessions(id),
-                user_id TEXT REFERENCES users(id),
-                fired_at TEXT,
-                acked_at TEXT,
-                ack_type TEXT
+            CREATE TABLE IF NOT EXISTS session_state (
+                id              INTEGER PRIMARY KEY DEFAULT 1,
+                is_active       INTEGER DEFAULT 0,
+                is_paused       INTEGER DEFAULT 0,
+                session_start   TEXT,
+                paused_at       TEXT,
+                paused_elapsed  INTEGER DEFAULT 0,
+                interval_min    INTEGER DEFAULT 25,
+                alarms_fired    INTEGER DEFAULT 0,
+                updated_at      TEXT
             );
 
             CREATE TABLE IF NOT EXISTS daily_summary (
-                id TEXT PRIMARY KEY,
-                user_id TEXT REFERENCES users(id),
-                date TEXT,
-                alarms_total INTEGER DEFAULT 0,
-                alarms_acked INTEGER DEFAULT 0,
-                goal_pct REAL,
-                goal_met INTEGER DEFAULT 0,
-                xp_earned INTEGER DEFAULT 0
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id         INTEGER REFERENCES users(id),
+                date            TEXT NOT NULL,
+                alarms_total    INTEGER DEFAULT 0,
+                alarms_positive INTEGER DEFAULT 0,
+                alarms_away     INTEGER DEFAULT 0,
+                alarms_paused   INTEGER DEFAULT 0,
+                hit_goal        INTEGER DEFAULT 0,
+                streak_counted  INTEGER DEFAULT 0,
+                created_at      TEXT DEFAULT CURRENT_TIMESTAMP
             );
 
-            CREATE TABLE IF NOT EXISTS admin_state (
-                id INTEGER PRIMARY KEY DEFAULT 1,
-                paused INTEGER DEFAULT 0,
-                paused_at TEXT,
-                resumed_at TEXT,
-                version TEXT DEFAULT '1.0.0'
+            CREATE TABLE IF NOT EXISTS badges (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id         INTEGER REFERENCES users(id),
+                badge_key       TEXT NOT NULL,
+                earned_at       TEXT DEFAULT CURRENT_TIMESTAMP
             );
 
-            INSERT OR IGNORE INTO admin_state (id, paused, version)
-            VALUES (1, 0, '1.0.0');
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id         INTEGER REFERENCES users(id),
+                content         TEXT NOT NULL,
+                is_system       INTEGER DEFAULT 0,
+                created_at      TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+
+            INSERT OR IGNORE INTO session_state (id) VALUES (1);
         """)
