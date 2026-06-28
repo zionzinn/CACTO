@@ -1,7 +1,7 @@
 """painel.py — Painel principal CACTO (usuário e admin), tela cheia."""
 import tkinter as tk
 from tkinter import font as tkfont
-from datetime import datetime
+from datetime import datetime, timezone
 import threading
 import config as cfg
 
@@ -200,16 +200,10 @@ class PainelWindow(tk.Toplevel):
             self._set_cd_msg("⏸ PAUSADA", ORANGE, "sessão pausada para todos")
             return False
 
-        naa = s.get("next_alarm_at")
-        if not naa:
+        secs = self._secs_until_next(s)
+        if secs is None:
             self._set_cd_num("--:--", ACCENT)
             self._lbl_cd_sub.config(text="")
-            return True
-        try:
-            secs = max(0, int(
-                (datetime.fromisoformat(naa) - datetime.utcnow()).total_seconds()))
-        except Exception:
-            self._set_cd_num("--:--", ACCENT)
             return True
 
         m, s_ = divmod(secs, 60)
@@ -221,6 +215,27 @@ class PainelWindow(tk.Toplevel):
         self._set_cd_num(f"{m:02d}:{s_:02d}", color)
         self._lbl_cd_sub.config(text="")
         return True
+
+    def _secs_until_next(self, s: dict) -> int | None:
+        """Segundos até o próximo alarme, calculado LOCALMENTE a partir de
+        session_start/interval_min/paused_elapsed — mesma lógica de ciclos do
+        timer. Não depende do next_alarm_at do backend (que desliza/gruda)."""
+        start_str = s.get("session_start")
+        if not start_str:
+            return None
+        try:
+            start_str = start_str.replace("Z", "+00:00")
+            start = datetime.fromisoformat(start_str)
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=timezone.utc)
+            interval = max(1, int(s.get("interval_min", 25)) * 60)
+            paused_elapsed = float(s.get("paused_elapsed") or 0)
+            elapsed = max(0.0, (datetime.now(timezone.utc) - start).total_seconds()
+                          - paused_elapsed)
+            remaining = interval - (elapsed % interval)
+            return max(0, int(remaining))
+        except Exception:
+            return None
 
     def _set_cd_num(self, text, color):
         if self._cd_kind != "num":
