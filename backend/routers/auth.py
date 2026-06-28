@@ -1,17 +1,23 @@
 """Registro, login e perfil do usuário."""
 
 import uuid
+import hashlib
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Header
 from pydantic import BaseModel
-from passlib.context import CryptContext
 from typing import Optional
 
 from database import get_conn, release, cursor as db_cursor
 
 router = APIRouter(tags=["auth"])
 
-pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+def _hash(pwd: str) -> str:
+    return hashlib.sha256(pwd.encode()).hexdigest()
+
+
+def _verify(pwd: str, stored: str) -> bool:
+    return hashlib.sha256(pwd.encode()).hexdigest() == stored
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +64,7 @@ def extrair_token(authorization: Optional[str]) -> str:
 def register(body: RegisterBody):
     agora = datetime.utcnow().isoformat()
     token = str(uuid.uuid4())
-    senha_hash = pwd_ctx.hash(body.password)
+    senha_hash = _hash(body.password)
 
     conn = get_conn()
     try:
@@ -100,13 +106,15 @@ def login(body: LoginBody):
     finally:
         release(conn)
 
-    if not usuario or not pwd_ctx.verify(body.password, usuario["password_hash"]):
+    if not usuario or not _verify(body.password, usuario["password_hash"]):
         raise HTTPException(status_code=401, detail="Email ou senha incorretos")
 
     return {
         "token": usuario["token"],
         "user_id": usuario["id"],
         "name": usuario["name"],
+        "email": usuario["email"],
+        "is_admin": bool(usuario["is_admin"]),
         "level": usuario["level"],
         "xp_total": usuario["xp_total"],
         "streak_current": usuario["streak_current"],
@@ -134,6 +142,7 @@ def me(authorization: Optional[str] = Header(default=None)):
         "id": usuario["id"],
         "name": usuario["name"],
         "email": usuario["email"],
+        "is_admin": bool(usuario["is_admin"]),
         "level": usuario["level"],
         "xp_total": usuario["xp_total"],
         "streak_current": usuario["streak_current"],
@@ -141,6 +150,6 @@ def me(authorization: Optional[str] = Header(default=None)):
         "popup_mode": usuario["popup_mode"],
         "agent_version": usuario["agent_version"],
         "last_seen": usuario["last_seen"],
-        "created_at": usuario["created_at"],
+        "created_at": str(usuario["created_at"]),
         "badges": [{"key": b["badge_key"], "earned_at": b["earned_at"]} for b in badges],
     }

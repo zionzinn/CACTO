@@ -213,6 +213,7 @@ class RegisterWindow(tk.Tk):
             "user_id":        result["user_id"],
             "name":           result.get("name", ""),
             "email":          email,
+            "is_admin":       result.get("is_admin", False),
             "streak_current": result.get("streak_current", 0),
             "level":          result.get("level", 1),
             "xp_total":       result.get("xp_total", 0),

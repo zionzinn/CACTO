@@ -65,10 +65,11 @@ class CactoAgent:
                 # Atualiza campos do perfil em cache
                 d = config.load()
                 d.update({
-                    "name":           me.get("name", d.get("name", "")),
+                    "name":           me.get("name",     d.get("name", "")),
                     "streak_current": me.get("streak_current", d.get("streak_current", 0)),
-                    "level":          me.get("level", d.get("level", 1)),
+                    "level":          me.get("level",    d.get("level", 1)),
                     "xp_total":       me.get("xp_total", d.get("xp_total", 0)),
+                    "is_admin":       me.get("is_admin", d.get("is_admin", False)),
                 })
                 config.save(d)
 
