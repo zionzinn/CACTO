@@ -168,13 +168,11 @@ class CactoAgent:
     def _open_painel_main(self):
         try:
             if self._painel_win and self._painel_win.winfo_exists():
-                self._painel_win.lift()
+                self._painel_win.show_and_focus()   # deiconify + lift + focus
                 return
         except Exception:
             pass
-        name = config.get("name", "")
-        uid  = config.get("user_id", 0)
-        self._painel_win = painel_module.show(self._root, self._api, name, uid)
+        self._painel_win = painel_module.show(self._root, self._api)
 
     # ── Polling loop (a cada 10s) ─────────────────────────────────
 
@@ -317,14 +315,15 @@ class CactoAgent:
     # ── Disparo do alarme ─────────────────────────────────────────
 
     def _disparar_alarme(self):
+        # Roda na thread principal (agendado via root.after). Constrói o popup
+        # oculto, dispara o som (não-bloqueante) e revela o popup em sequência
+        # imediata — som e popup chegam juntos.
         if self._popup_open:
             return
         self._popup_open = True
         self._timer.alarm_fired()
 
         alarm_time = datetime.utcnow().isoformat()
-        audio.play_alarm()
-
         streak = config.get("streak_current", 0)
         mult   = self._calc_mult(streak)
 
@@ -338,7 +337,8 @@ class CactoAgent:
             on_timeout=lambda: self._on_timeout(alarm_time),
             on_pause=self.pause_popups_local,
         )
-        popup.show()
+        audio.play_alarm()   # inicia thread interna e retorna na hora
+        popup.show()         # revela imediatamente após o som
 
     def _on_drink(self, alarm_time: str, response_time: str):
         self._popup_open = False

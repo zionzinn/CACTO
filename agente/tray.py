@@ -62,26 +62,31 @@ class CactoTray:
     def _build_menu(self) -> Menu:
         import config
         is_admin  = config.get("is_admin", False)
-        admin_key = config.get("admin_key", "")
+        admin_key = config.get("token", "")   # ações admin usam o token como bearer
 
+        # NB: pystray chama todo callback como action(icon, item) — os lambdas
+        # PRECISAM aceitar (icon, item), senão estouram TypeError e o menu
+        # inteiro fica "morto" (não responde ao clique).
         items = [
             Item("🌵 CACTO v1.0.0", None, enabled=False),
             Menu.SEPARATOR,
-            Item("Abrir painel", lambda: self._agent.open_painel()),
+            # default=True → acionado no clique do ícone (duplo-clique no Windows)
+            Item("Abrir painel", lambda icon, item: self._agent.open_painel(),
+                 default=True),
             Menu.SEPARATOR,
         ]
 
         if is_admin:
             items += [
-                Item("▶ Iniciar sessão",     lambda: self._do_admin("start",  admin_key)),
-                Item("⏸ Pausar para todos", lambda: self._do_admin("pause",  admin_key)),
-                Item("▶ Retomar para todos", lambda: self._do_admin("resume", admin_key)),
-                Item("■ Encerrar sessão",    lambda: self._do_admin("end",    admin_key)),
+                Item("▶ Iniciar sessão",     lambda icon, item: self._do_admin("start",  admin_key)),
+                Item("⏸ Pausar para todos", lambda icon, item: self._do_admin("pause",  admin_key)),
+                Item("▶ Retomar para todos", lambda icon, item: self._do_admin("resume", admin_key)),
+                Item("■ Encerrar sessão",    lambda icon, item: self._do_admin("end",    admin_key)),
                 Menu.SEPARATOR,
             ]
 
         def _pause_item(label, minutes):
-            return Item(label, lambda: self._agent.pause_popups_local(minutes))
+            return Item(label, lambda icon, item: self._agent.pause_popups_local(minutes))
 
         items += [
             Item("⏸ Pausar meus pop-ups", Menu(
@@ -91,15 +96,15 @@ class CactoTray:
                 _pause_item("Reunião",    90),
             )),
             Menu.SEPARATOR,
-            Item("🔇 Silenciar som",  self._toggle_sound),
+            Item("🔇 Silenciar som",  lambda icon, item: self._toggle_sound()),
             Menu.SEPARATOR,
-            Item("✖ Fechar CACTO",   lambda: self._agent.shutdown()),
+            Item("✖ Fechar CACTO",   lambda icon, item: self._agent.shutdown()),
         ]
 
         return Menu(*items)
 
     def _do_admin(self, action: str, admin_key: str):
-        api = self._agent.api
+        api = self._agent._api
         fn  = {"start": api.session_start,
                "pause": api.session_pause,
                "resume": api.session_resume,
