@@ -20,6 +20,7 @@ class GlobalTimer:
     def __init__(self):
         self._lock = threading.Lock()
         self._session_start = None
+        self._baseline_start = None    # start contra o qual já fizemos baseline
         self._interval_sec = 25 * 60
         self._is_active = False
         self._is_paused = False
@@ -46,10 +47,13 @@ class GlobalTimer:
                     print(f"[TIMER] erro parse session_start: {e}", flush=True)
                     new_start = None
 
-            if new_start != self._session_start:
-                # Sessão nova (ou primeira vez que a vemos) → baseline no ciclo
-                # já decorrido, para não disparar imediatamente.
-                self._session_start = new_start
+            self._session_start = new_start
+            # Só rebaseline quando vemos um start NOVO e válido (sessão nova).
+            # Um blip de rede (start=None por um poll) NÃO reseta o histórico —
+            # quando a sessão volta com o mesmo start, preservamos o ciclo já
+            # disparado e não perdemos/duplicamos alarme.
+            if new_start is not None and new_start != self._baseline_start:
+                self._baseline_start = new_start
                 self._last_fired_cycle = self._cycle()
 
     def _elapsed(self) -> float:

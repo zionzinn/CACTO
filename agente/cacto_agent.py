@@ -135,16 +135,26 @@ class CactoAgent:
             while True:
                 evt = self._event_queue.get_nowait()
                 try:
-                    if evt == "disparar_alarme":
-                        self._disparar_alarme()
-                    elif isinstance(evt, tuple) and evt[0] == "catchup":
+                    if isinstance(evt, tuple) and evt[0] == "catchup":
                         self._check_catchup(evt[1], evt[2])
                 except Exception as e:
                     print(f"[FILA] Erro ao processar '{evt}': {e}", flush=True)
         except queue.Empty:
             pass
+
+        # Detecção local do fim do ciclo — preciso e sincronizado com o painel.
+        self._maybe_fire()
+
         if self._root:
             self._root.after(200, self._process_queue)
+
+    def _maybe_fire(self):
+        if (self._timer.should_fire
+                and not self._away.is_away
+                and not self._popup_open
+                and not self._is_paused_locally()):
+            self._timer.alarm_fired()   # marca o ciclo antes de abrir o popup
+            self._disparar_alarme()
 
     # ── Single instance (Windows Named Mutex) ─────────────────────
 
@@ -232,16 +242,10 @@ class CactoAgent:
               f"secs={self._timer.seconds_until_next} "
               f"away={self._away.is_away} "
               f"popup={self._popup_open}", flush=True)
-
-        if (self._timer.should_fire
-                and not self._away.is_away
-                and not self._popup_open
-                and not self._is_paused_locally()):
-            # Marca o ciclo ANTES de enfileirar — evita re-disparo do mesmo
-            # ciclo caso o popup demore a abrir. NÃO chama root.after() daqui
-            # (thread de background é ignorada no Windows) — enfileira.
-            self._timer.alarm_fired()
-            self._event_queue.put("disparar_alarme")
+        # NB: o disparo NÃO acontece aqui. O poll só atualiza o estado da
+        # sessão (a cada 10s). A detecção do fim do ciclo é local e roda na
+        # thread principal (_maybe_fire, a cada 200ms) — sincronizada com o
+        # countdown do painel, sem esperar o próximo poll de rede.
 
     def _update_tray_from_timer(self):
         if not self._timer.is_active:
