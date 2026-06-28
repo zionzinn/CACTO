@@ -226,16 +226,21 @@ class CactoAgent:
         self._update_tray_from_timer()
         self._check_away_transition()
 
-        # Debug temporário — mostra o estado exato quando o timer zera.
-        print(f"[POLL] active={self._timer.is_active} paused={self._timer.is_paused} "
-              f"{self._timer.debug()} away={self._away.is_away} "
-              f"popup_aberto={self._popup_open}", flush=True)
+        # Debug temporário — mostra o estado exato a cada poll.
+        print(f"[POLL] active={self._timer.is_active} "
+              f"paused={self._timer.is_paused} "
+              f"secs={self._timer.seconds_until_next} "
+              f"away={self._away.is_away} "
+              f"popup={self._popup_open}", flush=True)
 
         if (self._timer.should_fire
                 and not self._away.is_away
                 and not self._popup_open
                 and not self._is_paused_locally()):
-            # NÃO chama root.after() daqui (thread de background) — enfileira.
+            # Marca o ciclo ANTES de enfileirar — evita re-disparo do mesmo
+            # ciclo caso o popup demore a abrir. NÃO chama root.after() daqui
+            # (thread de background é ignorada no Windows) — enfileira.
+            self._timer.alarm_fired()
             self._event_queue.put("disparar_alarme")
 
     def _update_tray_from_timer(self):
@@ -249,7 +254,7 @@ class CactoAgent:
             self._tray_update("away", "CACTO 🌵 | Ausente")
             return
 
-        secs = self._timer.seconds_until_next_alarm
+        secs = self._timer.seconds_until_next
         if secs is not None and secs > 0:
             m, s = divmod(secs, 60)
             tip = f"CACTO 🌵 | Próximo alarme em {m:02d}:{s:02d}"
@@ -273,7 +278,7 @@ class CactoAgent:
             # Voltou da ausência — calcula alarmes perdidos
             away_secs = time.time() - self._away_since
             self._away_since = None
-            interval_secs = max(1, self._timer.interval_min * 60)
+            interval_secs = max(1, self._timer.interval_sec)
             perdidos = max(0, int(away_secs // interval_secs))
             alarm_time = datetime.utcnow().isoformat()
             # Enfileira — _show_catchup cria Toplevel e precisa da thread principal.
@@ -359,8 +364,7 @@ class CactoAgent:
         if self._popup_open:
             return
         self._popup_open = True
-        self._timer.alarm_fired()
-        print("[ALARME] disparando popup + som", flush=True)
+        print("[ALARME] Disparando popup + som", flush=True)
 
         try:
             alarm_time = datetime.utcnow().isoformat()
@@ -388,6 +392,7 @@ class CactoAgent:
     def _on_popup_closed(self):
         """Chamado uma vez no destroy() do popup, em qualquer saída."""
         self._popup_open = False
+        print("[ALARME] Popup fechado. Pronto para próximo ciclo.", flush=True)
 
     def _on_drink(self, alarm_time: str, response_time: str):
         audio.stop_alarm()

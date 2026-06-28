@@ -48,6 +48,7 @@ class PopupCentral(tk.Toplevel):
         self.attributes("-topmost", True)
         self.configure(bg=ACCENT)   # borda ciano via bg + inner frame
         self.resizable(False, False)
+        self.protocol("WM_DELETE_WINDOW", self.destroy)  # fechar = destroy → on_close
 
         self._center()
         self._build_ui()

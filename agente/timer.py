@@ -1,75 +1,113 @@
-from datetime import datetime
-from typing import Optional
+"""
+Timer baseado em CICLOS.
+
+Em vez de confiar no next_alarm_at deslizante do servidor (que muda a cada
+poll e nunca estabiliza em zero), calculamos localmente quantos ciclos
+completos de `interval_sec` já se passaram desde `session_start`. Cada ciclo
+dispara no máximo uma vez (_last_fired_cycle). Robusto a polls perdidos e a
+servidor lento.
+
+Baseline: ao ver um session_start novo, fixamos _last_fired_cycle no ciclo já
+decorrido — assim NÃO disparamos no instante em que a sessão inicia (ciclo 0,
+ainda em contagem), nem ao reconectar no meio de um ciclo. O primeiro disparo
+acontece quando o primeiro intervalo COMPLETA (vira ciclo 1).
+"""
+from datetime import datetime, timezone
+import threading
 
 
 class GlobalTimer:
-    """
-    Calcula o estado do timer a partir dos dados do servidor.
-    O relógio é do servidor — next_alarm_at é a referência.
-    """
-
     def __init__(self):
-        self._session: dict = {}
-        self._next_alarm_at: Optional[str] = None
-        self._last_fired_alarm_at: Optional[str] = None
+        self._lock = threading.Lock()
+        self._session_start = None
+        self._interval_sec = 25 * 60
+        self._is_active = False
+        self._is_paused = False
+        self._paused_elapsed = 0.0
+        self._last_fired_cycle = 0
 
     def update(self, session_data: dict):
-        self._session = session_data or {}
-        self._next_alarm_at = self._session.get("next_alarm_at")
+        with self._lock:
+            self._is_active = bool(session_data.get("is_active", False))
+            self._is_paused = bool(session_data.get("is_paused", False))
+            self._interval_sec = max(1, int(session_data.get("interval_min", 25)) * 60)
+            self._paused_elapsed = float(session_data.get("paused_elapsed") or 0)
+
+            new_start = None
+            start_str = session_data.get("session_start")
+            if start_str:
+                # suporta com e sem timezone
+                start_str = start_str.replace("Z", "+00:00")
+                try:
+                    new_start = datetime.fromisoformat(start_str)
+                    if new_start.tzinfo is None:
+                        new_start = new_start.replace(tzinfo=timezone.utc)
+                except Exception as e:
+                    print(f"[TIMER] erro parse session_start: {e}", flush=True)
+                    new_start = None
+
+            if new_start != self._session_start:
+                # Sessão nova (ou primeira vez que a vemos) → baseline no ciclo
+                # já decorrido, para não disparar imediatamente.
+                self._session_start = new_start
+                self._last_fired_cycle = self._cycle()
+
+    def _elapsed(self) -> float:
+        """Segundos decorridos desde o início da sessão, descontando pausas."""
+        if not self._session_start:
+            return 0.0
+        now = datetime.now(timezone.utc)
+        total = (now - self._session_start).total_seconds()
+        return max(0.0, total - self._paused_elapsed)
+
+    def _cycle(self) -> int:
+        """Ciclo atual (sem lock — chamador deve segurar self._lock)."""
+        if not self._session_start:
+            return 0
+        return int(self._elapsed() / self._interval_sec)
 
     @property
-    def is_active(self) -> bool:
-        return bool(self._session.get("is_active"))
+    def current_cycle(self) -> int:
+        """Qual ciclo completo estamos (0 = ainda no primeiro intervalo)."""
+        with self._lock:
+            if not self._is_active or not self._session_start:
+                return -1
+            return self._cycle()
 
     @property
-    def is_paused(self) -> bool:
-        return bool(self._session.get("is_paused"))
-
-    @property
-    def interval_min(self) -> int:
-        return int(self._session.get("interval_min") or 25)
-
-    @property
-    def next_alarm_at(self) -> Optional[str]:
-        return self._next_alarm_at
-
-    @property
-    def seconds_until_next_alarm(self) -> Optional[int]:
-        if not self.is_active or self.is_paused:
-            return None
-        naa = self._next_alarm_at
-        if not naa:
-            return None
-        try:
-            diff = (datetime.fromisoformat(naa) - datetime.utcnow()).total_seconds()
-            # Diferença absurda (> 2h): relógio local provavelmente errado
-            if abs(diff) > 7200:
+    def seconds_until_next(self) -> int | None:
+        """Segundos até o próximo alarme. None se inativo/pausado."""
+        with self._lock:
+            if not self._is_active or self._is_paused or not self._session_start:
                 return None
-            return int(diff)
-        except Exception:
-            return None
+            elapsed = self._elapsed()
+            remaining = self._interval_sec - (elapsed % self._interval_sec)
+            return max(0, int(remaining))
 
     @property
     def should_fire(self) -> bool:
-        if not self.is_active or self.is_paused:
-            return False
-        naa = self._next_alarm_at
-        if not naa:
-            return False
-        secs = self.seconds_until_next_alarm
-        if secs is None:
-            return False
-        # Dispara quando zerou E ainda não disparamos ESTE alarme.
-        # Quando o servidor manda um next_alarm_at novo (diferente do último
-        # disparado), volta a disparar normalmente — nunca trava.
-        return secs <= 0 and naa != self._last_fired_alarm_at
+        """True quando um ciclo completou e ainda não disparamos para ele."""
+        with self._lock:
+            if not self._is_active or self._is_paused or not self._session_start:
+                return False
+            return self._cycle() > self._last_fired_cycle
 
     def alarm_fired(self):
-        """Registra o alarme que acabou de disparar. Evita double-fire do MESMO."""
-        self._last_fired_alarm_at = self._next_alarm_at
+        """Marcar que o ciclo atual já foi disparado."""
+        with self._lock:
+            cycle = self._cycle()
+            self._last_fired_cycle = cycle
+            print(f"[TIMER] Alarme disparado. Ciclo {cycle} marcado. "
+                  f"Próximo em ~{self._interval_sec}s", flush=True)
 
-    def debug(self) -> str:
-        return (f"next={self._next_alarm_at} "
-                f"last_fired={self._last_fired_alarm_at} "
-                f"secs={self.seconds_until_next_alarm} "
-                f"should_fire={self.should_fire}")
+    @property
+    def is_active(self) -> bool:
+        return self._is_active
+
+    @property
+    def is_paused(self) -> bool:
+        return self._is_paused
+
+    @property
+    def interval_sec(self) -> int:
+        return self._interval_sec
