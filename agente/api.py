@@ -145,3 +145,7 @@ class CactoAPI:
 
     def get_team_stats(self) -> dict | None:
         return self._get("/stats/team")
+
+    def get_online(self) -> list | None:
+        result = self._get("/admin/online")
+        return result if isinstance(result, list) else None
