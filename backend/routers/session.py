@@ -67,7 +67,7 @@ def _calcular_next_alarm(state: dict) -> Optional[str]:
     try:
         inicio = datetime.fromisoformat(state["session_start"])
         agora_dt = datetime.utcnow()
-        intervalo_s = (state["interval_min"] or 25) * 60
+        intervalo_s = state["interval_min"] or 10
         elapsed = (agora_dt - inicio).total_seconds() - (state["paused_elapsed"] or 0)
         falta = intervalo_s - (elapsed % intervalo_s)
         return (agora_dt + timedelta(seconds=falta)).isoformat()
@@ -296,8 +296,8 @@ class ConfigBody(BaseModel):
 @router.post("/config")
 def session_config(body: ConfigBody, authorization: Optional[str] = Header(default=None)):
     _require_admin(authorization)
-    if body.interval_min < 1 or body.interval_min > 120:
-        raise HTTPException(status_code=422, detail="interval_min deve ser entre 1 e 120")
+    if body.interval_min < 1 or body.interval_min > 7200:
+        raise HTTPException(status_code=422, detail="interval_min deve ser entre 1 e 7200")
     agora = _agora()
     conn = get_conn()
     try:
