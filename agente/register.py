@@ -170,8 +170,14 @@ class RegisterWindow(tk.Tk):
             self._busy(False); self._err("Sem conexão com o servidor"); return
         import config
         d = config.load()
-        d.update({"token": result["token"], "user_id": result["user_id"],
-                  "name": result.get("name", name), "email": email})
+        d.update({
+            "token":   result["token"],
+            "user_id": result["user_id"],
+            "name":    result.get("name", name),
+            "email":   email,
+            "level":   result.get("level", 1),
+            "xp_total": result.get("xp_total", 0),
+        })
         config.save(d)
         self._success = True
         self.quit()
@@ -202,9 +208,15 @@ class RegisterWindow(tk.Tk):
             self._busy(False); self._err("Sem conexão com o servidor"); return
         import config
         d = config.load()
-        d.update({"token": result["token"], "user_id": result["user_id"],
-                  "name": result.get("name", ""), "email": email,
-                  "streak_current": result.get("streak_current", 0)})
+        d.update({
+            "token":          result["token"],
+            "user_id":        result["user_id"],
+            "name":           result.get("name", ""),
+            "email":          email,
+            "streak_current": result.get("streak_current", 0),
+            "level":          result.get("level", 1),
+            "xp_total":       result.get("xp_total", 0),
+        })
         config.save(d)
         self._success = True
         self.quit()

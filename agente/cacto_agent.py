@@ -51,17 +51,36 @@ class CactoAgent:
             print("[CACTO] Já está rodando.")
             sys.exit(0)
 
-        # Cadastro / login (primeiro uso)
-        if not config.is_registered():
+        base_url = config.get("backend_url", "https://cacto-backend.onrender.com")
+        token    = config.get("token", "")
+
+        # Valida token existente; só mostra login se definitivamente inválido
+        if token:
+            me = CactoAPI(base_url, token).get_me()
+            if me is not None and me.get("error") == "unauthorized":
+                print("[CACTO] Token inválido — solicitando novo login.", flush=True)
+                config.set("token", "")
+                token = ""
+            elif me and not me.get("error"):
+                # Atualiza campos do perfil em cache
+                d = config.load()
+                d.update({
+                    "name":           me.get("name", d.get("name", "")),
+                    "streak_current": me.get("streak_current", d.get("streak_current", 0)),
+                    "level":          me.get("level", d.get("level", 1)),
+                    "xp_total":       me.get("xp_total", d.get("xp_total", 0)),
+                })
+                config.save(d)
+
+        if not token:
             from register import RegisterWindow
             ok = RegisterWindow().show()
             if not ok:
                 self._release_lock()
                 sys.exit(0)
             config.load()
+            token = config.get("token", "")
 
-        token    = config.get("token")
-        base_url = config.get("backend_url", "https://cacto-backend.onrender.com")
         self._api = CactoAPI(base_url, token)
 
         # Tk root oculto (master para janelas filhas)

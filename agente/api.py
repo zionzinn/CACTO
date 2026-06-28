@@ -74,7 +74,14 @@ class CactoAPI:
             return None
 
     def get_me(self) -> dict | None:
-        return self._get("/me")
+        try:
+            r = requests.get(f"{self.base_url}/me", headers=self._headers(), timeout=TIMEOUT)
+            if r.status_code == 401:
+                return {"error": "unauthorized"}
+            r.raise_for_status()
+            return r.json()
+        except Exception:
+            return None  # connection failed — token still assumed valid
 
     # ── Sessão ────────────────────────────────────────────────────────
 
