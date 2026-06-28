@@ -7,6 +7,7 @@ import os
 import sys
 import threading
 import time
+import queue
 import ctypes
 from datetime import datetime
 
@@ -33,6 +34,10 @@ class CactoAgent:
         self._api: CactoAPI | None = None
         self._timer = GlobalTimer()
         self._away  = AwayDetector(threshold_minutes=8)
+        # Fila de eventos: threads de background NUNCA chamam root.after()
+        # diretamente (no Windows isso é silenciosamente ignorado). Elas
+        # empurram eventos aqui e a thread principal os consome.
+        self._event_queue: queue.Queue = queue.Queue()
         self._popup_open    = False
         self._paused_until: float | None = None   # pause local de pop-ups
         self._away_since:   float | None = None   # quando começou a ausência atual
@@ -104,6 +109,9 @@ class CactoAgent:
         # Tray em thread daemon (run() bloqueia, por isso daemon)
         self._start_tray()
 
+        # Processador da fila de eventos — roda NA thread principal
+        self._root.after(200, self._process_queue)
+
         # Polling e heartbeat em threads daemon
         threading.Thread(target=self._polling_loop,   daemon=True, name="Polling").start()
         threading.Thread(target=self._heartbeat_loop, daemon=True, name="Heartbeat").start()
@@ -113,6 +121,30 @@ class CactoAgent:
             self._root.mainloop()
         finally:
             self._release_lock()
+
+    # ── Fila de eventos (consumida na thread principal) ───────────
+
+
+    def _process_queue(self):
+        """Drena a fila de eventos vindos das threads de background.
+
+        Toda interação com tkinter (popup, catch-up) acontece AQUI, na
+        thread principal — o único lugar seguro para tocar a GUI.
+        """
+        try:
+            while True:
+                evt = self._event_queue.get_nowait()
+                try:
+                    if evt == "disparar_alarme":
+                        self._disparar_alarme()
+                    elif isinstance(evt, tuple) and evt[0] == "catchup":
+                        self._check_catchup(evt[1], evt[2])
+                except Exception as e:
+                    print(f"[FILA] Erro ao processar '{evt}': {e}", flush=True)
+        except queue.Empty:
+            pass
+        if self._root:
+            self._root.after(200, self._process_queue)
 
     # ── Single instance (Windows Named Mutex) ─────────────────────
 
@@ -194,11 +226,17 @@ class CactoAgent:
         self._update_tray_from_timer()
         self._check_away_transition()
 
+        # Debug temporário — mostra o estado exato quando o timer zera.
+        print(f"[POLL] active={self._timer.is_active} paused={self._timer.is_paused} "
+              f"{self._timer.debug()} away={self._away.is_away} "
+              f"popup_aberto={self._popup_open}", flush=True)
+
         if (self._timer.should_fire
                 and not self._away.is_away
                 and not self._popup_open
                 and not self._is_paused_locally()):
-            self._root.after(0, self._disparar_alarme)
+            # NÃO chama root.after() daqui (thread de background) — enfileira.
+            self._event_queue.put("disparar_alarme")
 
     def _update_tray_from_timer(self):
         if not self._timer.is_active:
@@ -238,7 +276,8 @@ class CactoAgent:
             interval_secs = max(1, self._timer.interval_min * 60)
             perdidos = max(0, int(away_secs // interval_secs))
             alarm_time = datetime.utcnow().isoformat()
-            self._root.after(0, lambda n=perdidos, at=alarm_time: self._check_catchup(n, at))
+            # Enfileira — _show_catchup cria Toplevel e precisa da thread principal.
+            self._event_queue.put(("catchup", perdidos, alarm_time))
         self._was_away = now_away
 
     def _check_catchup(self, perdidos: int, alarm_time: str):
@@ -315,33 +354,42 @@ class CactoAgent:
     # ── Disparo do alarme ─────────────────────────────────────────
 
     def _disparar_alarme(self):
-        # Roda na thread principal (agendado via root.after). Constrói o popup
-        # oculto, dispara o som (não-bloqueante) e revela o popup em sequência
-        # imediata — som e popup chegam juntos.
+        # Roda SEMPRE na thread principal (drenado de _process_queue). Constrói
+        # o popup oculto, dispara o som (não-bloqueante) e revela em sequência.
         if self._popup_open:
             return
         self._popup_open = True
         self._timer.alarm_fired()
+        print("[ALARME] disparando popup + som", flush=True)
 
-        alarm_time = datetime.utcnow().isoformat()
-        streak = config.get("streak_current", 0)
-        mult   = self._calc_mult(streak)
+        try:
+            alarm_time = datetime.utcnow().isoformat()
+            streak = config.get("streak_current", 0)
+            mult   = self._calc_mult(streak)
 
-        popup = PopupCentral(
-            master=self._root,
-            alarm_time=alarm_time,
-            streak=streak,
-            xp_multiplier=mult,
-            on_drink=lambda rt: self._on_drink(alarm_time, rt),
-            on_empty=lambda rt: self._on_empty(alarm_time, rt),
-            on_timeout=lambda: self._on_timeout(alarm_time),
-            on_pause=self.pause_popups_local,
-        )
-        audio.play_alarm()   # inicia thread interna e retorna na hora
-        popup.show()         # revela imediatamente após o som
+            popup = PopupCentral(
+                master=self._root,
+                alarm_time=alarm_time,
+                streak=streak,
+                xp_multiplier=mult,
+                on_drink=lambda rt: self._on_drink(alarm_time, rt),
+                on_empty=lambda rt: self._on_empty(alarm_time, rt),
+                on_timeout=lambda: self._on_timeout(alarm_time),
+                on_pause=self.pause_popups_local,
+                # Garante reset da flag em QUALQUER caminho de fechamento.
+                on_close=self._on_popup_closed,
+            )
+            audio.play_alarm()   # inicia thread interna e retorna na hora
+            popup.show()         # revela imediatamente após o som
+        except Exception as e:
+            print(f"[ALARME] Erro ao criar popup: {e}", flush=True)
+            self._popup_open = False   # libera se falhou — não trava os próximos
+
+    def _on_popup_closed(self):
+        """Chamado uma vez no destroy() do popup, em qualquer saída."""
+        self._popup_open = False
 
     def _on_drink(self, alarm_time: str, response_time: str):
-        self._popup_open = False
         audio.stop_alarm()
         audio.play_xp_sound()
         result = self._api.event_drink(alarm_time, response_time)
@@ -356,7 +404,6 @@ class CactoAgent:
             print(f"[DRINK] +{xp} XP", flush=True)
 
     def _on_empty(self, alarm_time: str, response_time: str):
-        self._popup_open = False
         audio.stop_alarm()
         result = self._api.event_empty(alarm_time, response_time)
         if result is None:
@@ -367,7 +414,6 @@ class CactoAgent:
             print(f"[EMPTY] +{result.get('xp_earned', 8)} XP", flush=True)
 
     def _on_timeout(self, alarm_time: str):
-        self._popup_open = False
         audio.stop_alarm()
         threading.Thread(
             target=self._api.event_timeout, args=(alarm_time,), daemon=True

@@ -29,6 +29,7 @@ class PopupCentral(tk.Toplevel):
         on_empty: Callable,
         on_timeout: Callable,
         on_pause: Callable,
+        on_close: Callable = None,
     ):
         super().__init__(master)
         self._alarm_time = alarm_time
@@ -38,8 +39,10 @@ class PopupCentral(tk.Toplevel):
         self._on_empty = on_empty
         self._on_timeout = on_timeout
         self._on_pause = on_pause
+        self._on_close = on_close
         self._remaining = TIMEOUT_SECS
         self._answered = False
+        self._closed = False
 
         self.overrideredirect(True)
         self.attributes("-topmost", True)
@@ -149,6 +152,18 @@ class PopupCentral(tk.Toplevel):
         ).pack()
 
     # ── Controle ────────────────────────────────────────────────────
+
+    def destroy(self):
+        # Único ponto de saída: garante que on_close roda exatamente uma vez,
+        # libere _popup_open mesmo se o popup fechar por um caminho inesperado.
+        if not self._closed:
+            self._closed = True
+            if self._on_close:
+                try:
+                    self._on_close()
+                except Exception:
+                    pass
+        super().destroy()
 
     def show(self):
         self.deiconify()

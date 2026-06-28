@@ -15,17 +15,6 @@ def _mci(cmd: str):
     ctypes.windll.winmm.mciSendStringW(cmd, None, 0, None)
 
 
-def _play_mci(path: str, alias: str):
-    with _mci_lock:
-        try:
-            _mci(f'close {alias}')
-            _mci(f'open "{path}" type mpegvideo alias {alias}')
-            _mci(f'play {alias}')  # sem wait — não bloqueia a thread
-        except Exception as e:
-            print(f"[AUDIO] MCI erro ({alias}): {e}")
-            _play_fallback(path)
-
-
 def _stop_mci(alias: str):
     with _mci_lock:
         try:
@@ -54,12 +43,25 @@ def play_alarm():
     if not config.get("sound_enabled", True):
         return
     if not os.path.exists(_ALARM_PATH):
-        print(f"[AUDIO] Arquivo não encontrado: {_ALARM_PATH}")
+        print(f"[AUDIO] Arquivo não encontrado: {_ALARM_PATH}", flush=True)
         _play_beep()
         return
-    threading.Thread(
-        target=_play_mci, args=(_ALARM_PATH, "cacto_alarm"), daemon=True
-    ).start()
+
+    def _tocar():
+        # Sequência robusta: SEMPRE fecha o alias antes de reabrir. Sem isso,
+        # a 2ª chamada falha ("device already open") e o som não toca de novo.
+        with _mci_lock:
+            mci = ctypes.windll.winmm.mciSendStringW
+            mci("close cacto_alarm", None, 0, None)
+            err = mci(f'open "{_ALARM_PATH}" type mpegvideo alias cacto_alarm',
+                      None, 0, None)
+            if err != 0:
+                print(f"[AUDIO] MCI open error: {err}", flush=True)
+                _play_fallback(_ALARM_PATH)
+                return
+            mci("play cacto_alarm", None, 0, None)  # sem wait — não bloqueia
+
+    threading.Thread(target=_tocar, daemon=True).start()
 
 
 def stop_alarm():
